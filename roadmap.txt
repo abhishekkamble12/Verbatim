@@ -1,0 +1,189 @@
+CiteGuard Roadmap: Building Fast with a Coding Agent (Claude Code)
+5 weeks, solo. Full design lives in Project.txt; this file is the execution plan.
+
+How to read this file
+- Each task has: ID, owner (AGENT or YOU), a prompt to paste, "Done when" checks, and a verify command.
+- AGENT tasks: paste the prompt into Claude Code. YOU tasks: the agent must not do these (labels, decisions, review).
+- One task = one session = one commit. Start a fresh session (/clear) for each task to keep context small.
+
+==================================================================
+0. Setup (Day 1, half a day)
+==================================================================
+0.1 Workflow loop for every AGENT task
+  1. git checkout -b task/<ID>
+  2. Paste the task prompt. Ask the agent to plan first ("plan, then wait for my OK") for any task marked [PLAN FIRST].
+  3. Agent writes the failing test first, then the code, then runs the verify command.
+  4. YOU read the diff (git diff main). If you cannot explain a line, ask the agent to explain or simplify it.
+  5. Run the verify command yourself. Green -> commit -> merge to main.
+  6. Write one line in NOTES.md: what was decided and why (this becomes your interview prep).
+
+0.2 Speed tricks
+  - Use plan mode for anything touching more than 3 files.
+  - Run two agent sessions in parallel only on tasks marked [PARALLEL OK] (they touch different packages). Use git worktrees.
+  - Use /code-review (or /ponytail-review) before merging the big tasks: T2.4, T3.2, T4.1, T5.1.
+  - Cache LLM calls in eval (keyed by prompt hash) so re-running eval is fast and cheap.
+  - When stuck more than 30 minutes on a bug, tell the agent: "diagnose this: reproduce, minimise, then fix the root cause".
+
+0.3 CLAUDE.md (create at repo root; the agent reads it every session)
+---------------------------------------------------------------
+# CiteGuard agent rules
+Stack: Python 3.12, FastAPI, PostgreSQL 16 + pgvector, SQS (LocalStack locally), React + Vite + TS, Terraform.
+Commands: `make test` (pytest -q), `make eval`, `make up` (docker compose up), `make lint` (ruff).
+
+Rules:
+- Never hardcode metrics anywhere. Numbers in README/RESULTS.md come only from results.json written by eval scripts.
+- Every SQL query on chunks/sources/messages filters by user_id AND notebook_id.
+- The LLM returns chunk IDs only; quotes and pages are resolved by code.
+- No new frameworks or dependencies without asking (no LangChain, LangGraph, CrewAI, Redis).
+- Write the failing test first. A task is done only when `make test` passes.
+- Keep functions small and plain. No abstraction "for later".
+- Unfinished features go under "Planned" in README, never as working.
+- Secrets come from env vars / SSM, never from code.
+---------------------------------------------------------------
+
+0.4 AGENT T0.1 Repo skeleton
+Prompt: "Create the CiteGuard repo skeleton per the structure in Project.txt section 11: Makefile (test, eval, up, lint), docker-compose.yml with postgres (pgvector image) and localstack (S3, SQS), pyproject with ruff + pytest, empty packages with __init__.py, one passing smoke test, and a GitHub Actions workflow that runs make lint and make test. No app code yet."
+Done when: `make up` starts postgres + localstack; `make test` passes; CI green on GitHub.
+
+==================================================================
+WEEK 1: Phase 0 fixes + eval harness + first data
+==================================================================
+T1.1 AGENT [PLAN FIRST] Verifier regression tests + digit bug
+Prompt: "In packages/verification, write regression tests for: altered digit (12.5% vs 13.5%), changed date, changed unit, negation ('did not improve'), wrong entity, partial support. Then fix the fuzzy matcher so numbers, dates and units must match exactly after normalization, unless the claim contains 'about', 'approximately' or '~'. Tests first, then fix."
+Done when: all six regression tests pass; old tests still pass.
+Verify: pytest tests/unit/verification -q
+
+T1.2 AGENT Eval harness
+Prompt: "Build packages/evaluation: loaders for data/golden/*.jsonl and data/verifier/*.jsonl (schemas in Project.txt 7.1 and 7.2), metric functions (Recall@k, MRR@10, nDCG@10, precision/recall/F1, false-acceptance rate, confusion matrix, bootstrap 95% CI), and `make eval` that writes results/results.json. Add unit tests for each metric using hand-computed tiny examples."
+Done when: metric tests pass; `make eval` writes results.json on a 3-row toy file.
+Verify: pytest tests/unit/evaluation -q && make eval
+
+T1.3 AGENT README generator
+Prompt: "Write scripts/render_results.py that reads results/results.json and rewrites the table between <!-- RESULTS:START --> and <!-- RESULTS:END --> in README.md and RESULTS.md. Remove every hardcoded metric from README and the gallery. Add a test."
+Done when: grep finds no numeric metric outside the generated block.
+
+T1.4 AGENT Design-doc audit
+Prompt: "Compare the design doc against the code. For each claim (arq/Redis queue, Postgres checkpointer, pgvector retrieval, single vs multi mode) output a table: claim | exists in code? | file. Move anything not implemented to a 'Planned' section. Do not implement anything."
+Done when: YOU have reviewed the table and the doc matches the code.
+
+T1.5 YOU Data (the part only you can do; about 1 day spread over the week)
+- Pick 20-30 documents (papers, technical docs), mixed lengths, some with tables of numbers.
+- Write 50 golden questions across all 8 categories (Project.txt 7.1). At least 6 unanswerable.
+- Relabel the 175 verifier pairs by hand. The agent may draft labels; you must check every one.
+- Tip: ask the agent "draft 20 candidate questions for doc X in category Y" and then edit/reject. Mark the final set as written by you.
+
+Week 1 exit: verifier bug fixed, make eval works, README has no hardcoded numbers, 50 questions + 175 relabelled pairs.
+
+==================================================================
+WEEK 2: Ingestion + retrieval + E1-E4
+==================================================================
+T2.1 AGENT [PARALLEL OK] Ingestion
+Prompt: "In packages/ingestion: parse PDF with PyMuPDF (text per page, detect headings from font size/bold; refuse PDFs without a text layer with a clear error) and URLs with Trafilatura. Structure-aware chunker: 400-600 tokens, 60-100 overlap, never split mid-sentence, each chunk stores page, section, start/end char offsets into page text, SHA-256 hash. Test: offsets round-trip (page_text[start:end] == chunk.text) on 2 sample PDFs."
+Done when: offset round-trip test passes on both PDFs.
+
+T2.2 AGENT [PARALLEL OK] DB schema + migrations
+Prompt: "Create Alembic migrations for the schema in Project.txt section 9. chunks has embedding vector(1024) with HNSW index and a generated tsvector column with GIN index. Add a repository layer where every chunk query requires user_id and notebook_id. Add tests/security/test_cross_user.py proving user B cannot retrieve user A's chunks."
+Done when: migrations apply on fresh DB; cross-user test passes.
+
+T2.3 AGENT LLM gateway + embeddings
+Prompt: "In packages/llm_gateway: one function for chat (Bedrock, with Groq fallback via env var) and one for embeddings (Bedrock Titan Embeddings v2). Disk cache keyed by (model, prompt hash). Record tokens, cost and latency to usage_ledger. Embedding cache keyed by (content hash, model version). Tests with a fake provider."
+Done when: tests pass without network; second identical call hits cache.
+
+T2.4 AGENT [PLAN FIRST] Hybrid retrieval
+Prompt: "In packages/retrieval: dense top-20 (pgvector cosine), sparse top-20 (PostgreSQL full-text, websearch_to_tsquery), RRF fusion (k=60), optional cross-encoder rerank (bge-reranker-base via sentence-transformers) to top 5-8. Contextual headers: embed 'doc title > section > chunk text' but store the plain chunk text. Each stage toggled by a config dict so ablations can switch them. Tests for RRF on a hand-made example."
+Done when: RRF test passes; a query over sample docs returns sensible chunks.
+
+T2.5 AGENT Retrieval ablation runner
+Prompt: "Write evaluation/run_retrieval.py and run_ablation.py that run E1, E2, E2b, E3, E4 (Project.txt 7.4) on the dev split and write per-experiment Recall@5/10, MRR@10, nDCG@10, per-category breakdown, p50/p95 latency and cost into results.json."
+Done when: `python -m evaluation.run_ablation --only E1,E2,E2b,E3,E4` produces a table.
+
+T2.6 YOU
+- Read the E1-E4 table. Write in NOTES.md which step helped, which did not, and why (look at 3 failed questions per experiment).
+- Drop the reranker if E4 does not beat E3 meaningfully (this lets you use t4g.small).
+- Grow golden set to 100 questions.
+
+==================================================================
+WEEK 3: Grounded chat + verification + E5-E7
+==================================================================
+T3.1 AGENT Grounded generation
+Prompt: "Implement answer generation returning the JSON schema in Project.txt section 5 (claims with chunk_ids, insufficient_evidence). Validate with Pydantic; on invalid JSON retry once then fail cleanly. The system resolves quote and page from chunk_id. Prompt must instruct abstention when evidence is missing. Tests with a fake LLM including a hallucinated chunk_id."
+Done when: hallucinated chunk_id is rejected in tests.
+
+T3.2 AGENT [PLAN FIRST] Claim verification pipeline
+Prompt: "Wire verification: stage 1 deterministic (chunk ID valid, quote exists at offsets, numbers/dates/entities match), stage 2 LLM entailment (supports/partial/unsupported + reason). Only verified claims reach the answer. If none survive, answer 'The sources do not say.' Escalate to the larger model only when the small model's claims fail verification. Tests for each path."
+Done when: tests cover pass, fail, partial, abstain, escalate.
+
+T3.3 AGENT Query rewrite + chat API
+Prompt: "Add follow-up query rewriting (only when conversation has prior turns). Add FastAPI endpoints: POST /notebooks, POST /notebooks/{id}/uploads (returns S3 presigned URL), POST /notebooks/{id}/chat, GET /jobs/{id}. Auth via a JWT dependency that is stubbed locally and uses Cognito in prod. Integration tests against docker compose."
+Done when: integration test uploads a PDF, waits for ingestion, chats, gets a cited answer.
+
+T3.4 AGENT Worker
+Prompt: "services/worker: SQS consumer (LocalStack locally) for ingestion jobs. Idempotency key = source SHA-256; visibility timeout; after 3 failures message goes to DLQ; job state in jobs table. Test: killing the worker mid-job and restarting does not duplicate chunks."
+Done when: crash/restart test passes.
+
+T3.5 AGENT Verifier + answer eval, E5-E7, CI gate
+Prompt: "Write run_verifier.py (precision, recall, F1, false-acceptance, false-rejection, confusion matrix on data/verifier and a SciFact subset) and extend run_ablation to E5-E7 with citation precision/recall, faithfulness and abstention accuracy. Add a CI job that runs eval on the dev split with cached LLM calls and fails if false-acceptance rises or Recall@10 drops vs results/baseline.json."
+Done when: CI fails on a deliberately broken verifier (try it once, then revert).
+
+T3.6 YOU
+- Hand-label 30 answers to check the LLM judge; record agreement in RESULTS.md.
+- Find and write down 3 real verifier failures with examples.
+
+==================================================================
+WEEK 4: Report Agent + E8
+==================================================================
+T4.1 AGENT [PLAN FIRST] Report Agent
+Prompt: "In packages/agent build the Report Agent from Project.txt section 6 as a plain Python state machine (PLAN -> RESEARCH (per sub-question) -> COMPOSE -> DONE). Tools: search_notebook, read_chunk, verify_claim (reuse existing functions). Budgets: max 4 sub-questions, 1 retry each, 12 LLM calls, token cap; on budget hit return a partial report marked partial. Log every step to agent_steps. No agent framework. Tests with a fake LLM: normal run, retry path, budget stop, all-unsupported."
+Done when: four tests pass; agent_steps shows a readable trace.
+
+T4.2 AGENT Agent job + API
+Prompt: "Run the Report Agent as an SQS job type 'report'. POST /notebooks/{id}/reports enqueues it; GET /jobs/{id} returns status; finished report (markdown + claims + citations) saved to S3 and reports table. Add GET /reports/{id}/trace returning agent_steps."
+Done when: integration test produces a report end to end.
+
+T4.3 AGENT E8 + cost
+Prompt: "Write evaluation/run_agent.py: on multi-hop and comparative dev questions, compare single-shot E7 vs the Report Agent: answer correctness, verified-claim rate, avg steps, retries, budget-stop rate, p95 latency, cost per answer. Write to results.json as E8."
+Done when: E8 row appears in the README table.
+
+T4.4 YOU
+- Grow golden set to 150. Run the final eval on the TEST split once. Do not tune after this.
+- Write in NOTES.md when the agent wins and when it only costs more. Publish either result.
+
+==================================================================
+WEEK 5: Deploy + UI + ship
+==================================================================
+T5.1 AGENT [PLAN FIRST] Terraform
+Prompt: "infra/terraform for Project.txt section 8.1: VPC with public subnet (no NAT), EC2 t4g.small with IAM instance profile and SSM Session Manager (no SSH, no port 22), security group allowing only 443/80, S3 buckets (private uploads, reports, frontend) with CloudFront + OAC for the frontend, SQS + DLQ, Cognito user pool, SSM parameters, CloudWatch log group + alarm, AWS Budgets alerts at 5/15/25 USD, EventBridge Scheduler stopping the instance nightly. Output a cost list per resource. Do not apply."
+Done when: terraform validate and plan succeed. YOU read the plan before apply.
+
+T5.2 YOU Deploy
+- terraform apply. Deploy containers to EC2 (docker compose via SSM). Nightly pg_dump to S3; restore once to prove it works.
+- Check the Budgets alert email arrives.
+
+T5.3 AGENT [PARALLEL OK] Minimal UI
+Prompt: "apps/web (React + Vite + TS): Cognito login, notebook list, upload, chat with claim list (status badge per claim), evidence panel (quote snippet + page number + source link), report view with 'show trace', cost shown per answer and report. Plain CSS, no component library."
+Done when: you can do the full demo flow in the browser.
+
+T5.4 AGENT [OPTIONAL] MCP server
+Prompt: "Add services/mcp: a small MCP server (official Python MCP SDK) exposing search_notebook, read_chunk, verify_claim, reusing existing functions and requiring an API token. README section on connecting it to Claude Desktop."
+Done when: Claude Desktop can call search_notebook on your notebook.
+
+T5.5 AGENT README + RESULTS
+Prompt: "Write README.md following Project.txt section 12, using the generated results table, the architecture diagram as Mermaid, a Known Limitations section (single EC2 host = single point of failure, no OCR, English only, etc.), and setup steps. Nothing claimed that is not in the code."
+
+T5.6 YOU Ship
+- Record a 2-minute demo video: upload -> question -> evidence receipt -> abstention case -> report + trace -> cost.
+- Fill resume bullets only from results.json.
+- Practise the interview questions in Project.txt section 14 out loud, using NOTES.md.
+
+==================================================================
+Cut order if behind schedule
+==================================================================
+PDF highlight -> MCP (T5.4) -> E6 -> query rewrite -> UI polish.
+Never cut: eval (T1.2, T2.5, T3.5, T4.3), verifier (T1.1, T3.2), agent budgets (T4.1).
+
+==================================================================
+Daily rhythm (about 6 hours)
+==================================================================
+- 1 h: YOU tasks (labels, reading results, NOTES.md).
+- 4 h: 2-3 AGENT tasks through the workflow loop (0.1).
+- 1 h: read the code the agent wrote that day until you can explain it without notes.

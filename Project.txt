@@ -1,0 +1,383 @@
+CiteGuard: A Verified-Citation Research Workspace with a Bounded Research Agent
+Goal: a solo fresher project, finished in 5 weeks, defensible in any interview, and the flagship on the resume.
+Domains covered: GenAI (RAG + evaluation), agentic AI (one bounded agent), backend (queues, auth, multi-tenant data), cloud (AWS + Terraform).
+
+CiteGuard is a source-grounded research workspace. It proves every claim against the original text, or it refuses to answer. Its uniqueness rests on four things most fresher projects lack: verified citations, a published benchmark, honest abstention, and a research agent with a hard budget.
+
+==================================================================
+1. Positioning
+==================================================================
+Do not clone NotebookLM. You cannot beat its audio overviews, mind maps or Google-scale infrastructure. Compete on trust instead.
+
+One-liner: CiteGuard shows an evidence receipt for every claim, or says "the sources do not say".
+
+Typical fresher RAG project          | CiteGuard
+-------------------------------------|---------------------------------------------------------
+Upload a PDF, chat with it           | Every claim carries an exact quote, page and character offset
+Answers even when sources are silent | Abstains when evidence is insufficient
+"Works well" with no numbers         | Published ablation table (E1 to E8) with false-acceptance rate
+Agent = framework demo               | One plain-Python agent with step, retry and token budgets, measured against single-shot RAG
+No cost awareness                    | Cost per answer and per report shown in the UI
+Local demo only                      | Live AWS deployment provisioned with Terraform
+
+Four signature ideas:
+1. Evidence Receipt: each claim links to the chunk, quote, page and a verifier verdict with a reason.
+2. Abstention first: "the sources do not say" is a valid, measured output.
+3. Benchmark in the repo: one command reproduces every number in the README.
+4. Bounded Report Agent: plans sub-questions, retrieves, verifies, retries once, and composes a report from verified claims only.
+
+==================================================================
+2. Truth rules (non-negotiable)
+==================================================================
+- Only numbers produced by the eval scripts go in the README or resume. No hardcoded metrics.
+- Features not in the code go under "Planned", never on the resume.
+- Labels written by an LLM are not "human-verified". Review them yourself.
+- Mock or illustrative numbers must be labelled as mock.
+- If an experiment does not help (for example the agent loses to single-shot), publish that result.
+- If you cannot explain it in an interview, do not list it.
+
+==================================================================
+3. Phase 0: audit and fixes (Week 1, do this first)
+==================================================================
+# | Problem                                                          | Fix
+1 | Stage 1 fuzzy match passes altered digits                        | Strict normalized comparison for numbers, dates and units. Tolerance only when the claim says "about" or "approximately"
+2 | README and gallery metrics are hardcoded or synthetic            | make eval writes results.json, which generates the README table
+3 | Design doc (arq/Redis, Postgres checkpointer, single vs multi mode) does not match the code | Verify each claim against code. Implement it or mark it "Planned"
+4 | Verifier test coverage is unclear                                | Regression tests: altered digit, negation, wrong entity, partial support
+
+Exit criteria: verifier bug fixed, make eval works, no hardcoded numbers in the README.
+
+==================================================================
+4. MVP scope
+==================================================================
+Build (must have)
+Area          | Detail
+Ingestion     | PDF (PyMuPDF) and URL (Trafilatura). Check for a text layer; no OCR
+Chunking      | Structure-aware (headings, paragraphs), 400-600 tokens, overlap 60-100; each chunk keeps page, section, start/end character offsets
+Contextual headers | Prepend "doc title > section heading" to each chunk before embedding (stored text stays unchanged, so offsets stay valid)
+Retrieval     | pgvector (dense) + PostgreSQL full-text (sparse), fused with RRF, (a cross-encoder reranker is Planned: it needs sentence-transformers, so it is not built or measured)
+Chat          | Grounded answer, claim-level output, citation by chunk ID, abstention
+Verification  | Deterministic checks (chunk ID valid, quote exists, offsets valid, numbers, dates, entities) + LLM entailment
+Report Agent  | Plan -> retrieve -> verify -> retry once -> compose; hard budgets; runs as an SQS job
+Evaluation    | Golden set, retrieval, verifier, agent metrics, ablation E1-E8, CI gate
+Backend       | FastAPI, SQS job queue + DLQ, S3 presigned uploads, Cognito auth, user_id + notebook_id filters
+Deploy        | Docker Compose, Terraform, EC2, S3, CloudFront
+UI            | Upload, chat, evidence panel (snippet + page link), claim status, report view, cost per answer/report
+
+Optional (only if Week 5 has time)
+- MCP server exposing search_notebook, read_chunk, verify_claim (thin wrapper over existing functions, about 1 day)
+- PDF.js exact highlighting (3-4 days; ship the text-snippet view first)
+
+Later, or diagram only
+DOCX/PPTX parsing, Docling, Textract OCR, parent-child chunking (E6 only if time allows), knowledge graph, flashcards and quizzes, audio overview, sharing roles, source versioning, row-level security, multi-agent anything, fine-tuning, Fargate/RDS/API Gateway scale-up.
+
+==================================================================
+5. RAG pipeline
+==================================================================
+Upload (PDF/URL) -> S3 (presigned)
+   |
+   v
+SQS ingestion job -> Worker
+   |
+   v
+Parse (text, pages, headings) -> Normalize
+   |
+   v
+Structure-aware chunks (page, section, offsets, SHA-256 hash)
+   |
+   v
+Contextual header + embedding (Bedrock Titan Embeddings v2, model version stored)
+   |
+   v
+Postgres: pgvector (HNSW) + tsvector (GIN)
+
+Question
+   |
+   v
+Query rewrite (follow-ups only)
+   |
+   +--> Dense top-20  (pgvector, WHERE user_id AND notebook_id)
+   +--> Sparse top-20 (full-text, same filter)
+   |
+   v
+RRF fusion -> Cross-encoder rerank -> Top 5-8 evidence
+   |
+   v
+LLM: structured claims with chunk IDs
+   |
+   v
+Verify: ID valid? quote at offset? numbers/dates? entailment?
+   |
+   v
+Answer (verified claims only) or "insufficient evidence"
+
+Design rules:
+- Filter by user_id and notebook_id in SQL, before retrieval. Never rely on the LLM to ignore other users' data.
+- Call it "PostgreSQL full-text retrieval", not BM25.
+- The LLM returns only chunk IDs. The system resolves quote and page, so the model cannot invent them.
+- If the sources do not contain the answer, abstain.
+- Cache embeddings by content hash + model version; re-embed only when either changes.
+- Small LLM by default; escalate to a larger model only when verification fails.
+
+Structured output:
+{
+  "answer": "...",
+  "claims": [
+    {"text": "Study A reported faster task completion.",
+     "citations": [{"chunk_id": "chunk_42"}],
+     "support_status": "pending"}
+  ],
+  "insufficient_evidence": false
+}
+
+==================================================================
+6. Report Agent (the agentic part)
+==================================================================
+Question -> PLAN: LLM splits it into at most 4 sub-questions (JSON)
+              |
+              v
+   for each sub-question:
+     search_notebook -> draft claims -> verify_claim
+        unsupported? -> rewrite query, retry ONCE -> still fails -> "insufficient evidence" for that part
+              |
+              v
+COMPOSE: report from verified claims only -> S3 -> job status = done
+
+Budgets (enforced in code, logged per run):
+- max 4 sub-questions, max 1 retry per sub-question
+- max 12 LLM calls per report
+- token cap per report; stop and return partial report if exceeded
+
+Tools: search_notebook, read_chunk, verify_claim (the same functions chat uses).
+Implementation: a plain Python state machine. No LangGraph, CrewAI or multi-agent setup.
+Interview answer: "The loop has four states. A framework would hide the budget logic I needed to measure."
+Every agent step is written to an agent_steps table (state, tool, input, output, tokens, latency), so any report can be replayed and debugged.
+
+==================================================================
+7. Evaluation (the hero of the project)
+==================================================================
+7.1 Golden dataset (grow in stages)
+- Week 1: 50 questions. Week 2: 100. Week 4: 150. Over 20-30 documents.
+- Split 2:1 dev/test. Never tune on the test set.
+- Categories: factual, numerical, multi-document, multi-hop, comparative, temporal, unanswerable, conflicting.
+- Per question: expected answer, gold evidence passages, relevant source IDs, answerable yes/no.
+
+7.2 Verifier dataset
+- Relabel the existing 175 pairs by hand, then extend toward 300 (supports / partial / unsupported).
+- Also test on a public subset (SciFact or a FEVER-style set).
+
+7.3 Metrics
+Layer      | Metrics
+Retrieval  | Recall@5, Recall@10, MRR@10, nDCG@10
+Verifier   | Precision, recall, F1, false-acceptance rate (primary), false-rejection rate, confusion matrix
+Citations  | Citation precision, citation recall
+Answer     | Faithfulness, abstention accuracy (RAGAS as secondary check only)
+Agent      | Answer correctness on multi-hop/comparative, verified-claim rate, avg steps, retries used, budget-stop rate
+System     | p50/p95 latency, cost per answer, cost per report
+
+Validate any LLM-as-judge against a human-labelled subset and report agreement.
+
+7.4 Ablation
+ID  | Architecture
+E1  | Fixed chunks + dense
+E2  | Structure-aware chunks + dense
+E2b | E2 + contextual chunk headers
+E3  | Best of E2/E2b + hybrid (dense + full-text + RRF)
+E4  | E3 + cross-encoder reranker (Planned, not built)
+E5  | E3 + query rewriting (Planned: needs multi-turn golden questions)
+E6  | parent-child context (Planned, not built)
+E7  | Best pipeline + claim-level verification
+E8  | E7 single-shot vs E7 inside the Report Agent (multi-hop and comparative questions)
+Report metrics, latency and cost for each. If a step does not help, remove it and write down why.
+
+7.5 Release gates (starting targets, revise after real data)
+Recall@10 >= 0.85 | Citation precision >= 0.95 | Unsupported-claim acceptance <= 0.02 | p95 chat latency <= 12 s
+Show confidence intervals and per-category numbers.
+
+7.6 CI
+Run the eval (dev split, cached LLM calls) on every pull request. Fail if false-acceptance rate rises or Recall@10 drops.
+
+==================================================================
+8. AWS system design
+==================================================================
+8.1 Low-cost deployment (what you will actually run)
+Browser
+  |
+  +--> CloudFront -> S3 (React static frontend)
+  +--> Cognito (login, JWT)
+  +--> EC2 t4g.small (Docker Compose)
+          |- FastAPI (chat, presigned uploads, job status)
+          |- Worker (SQS consumer: ingestion + Report Agent jobs)
+          |- PostgreSQL + pgvector (EBS, nightly pg_dump -> S3)
+          |- Reranker (only if E4 proves it helps; else t4g.small is enough)
+  +--> S3 (PDFs, reports)
+  +--> SQS (jobs) + DLQ
+  +--> Bedrock: Titan Embeddings v2 + small LLM (Groq as a fallback provider)
+  +--> SSM Parameter Store, IAM instance profile, Session Manager (no SSH)
+  +--> CloudWatch (logs, alarms) + AWS Budgets
+  +--> EventBridge Scheduler -> ec2:StopInstances at night (no code)
+
+Flow:
+1. User logs in through Cognito.
+2. Frontend gets a presigned URL and uploads straight to private S3.
+3. API puts an ingestion job on SQS.
+4. Worker parses, chunks, embeds and stores in Postgres.
+5. Chat: retrieve -> generate -> verify -> answer.
+6. Report: API enqueues an agent job; worker runs the agent; report saved to S3; UI polls job status.
+
+8.2 Services and why
+Service              | Job                    | Reason
+S3                   | Documents, reports     | Cheap, durable
+CloudFront           | Frontend               | CDN + HTTPS
+Cognito              | Auth                   | Managed JWT
+EC2                  | API, worker, DB        | Simplest and cheapest
+SQS + DLQ            | Ingestion, agent jobs  | Retries, decoupling
+Bedrock              | Embeddings, LLM        | Pay per token, frees RAM on EC2
+CloudWatch           | Logs, alarms           | Basic monitoring
+IAM instance profile | Permissions            | No hardcoded keys
+SSM Parameter Store  | Config, secrets        | Cheaper than Secrets Manager
+EventBridge Scheduler| Stop EC2 when idle     | Cuts compute cost with zero code
+Terraform            | Infrastructure as code | Reproducible, strong resume signal
+
+8.3 Cost decisions
+- API embeddings (Titan v2) instead of local BGE: frees 1-2 GB RAM, allows t4g.small.
+- No Redis, NAT Gateway, OpenSearch, Aurora or RDS. pgvector + full-text is enough.
+- EC2 in a public subnet with a tight security group; Postgres port never exposed.
+- Stop EC2 outside demo hours (pay only EBS). Keep it running during application season; demo video as fallback.
+- Nightly pg_dump to S3; test one restore.
+- AWS Budgets alerts on day one ($5, $15, $25).
+- Develop on local Docker for weeks 1-4; launch AWS only in week 5.
+Estimate: about $8-15/month part-time, $15-25 always-on, plus LLM tokens. Not a quote; verify with the AWS Pricing Calculator. Free-tier terms change; check AWS directly.
+
+8.4 Cost controls inside the app (illustrative, tune them)
+COST_LIMITS = {
+    "max_input_tokens": 10000,
+    "max_output_tokens": 1500,
+    "max_retrieved_chunks": 8,
+    "max_queries_per_minute": 10,
+    "max_documents_per_notebook": 50,
+    "max_agent_llm_calls": 12,
+}
+Plus: daily user quota, prompt + embedding caches, per-job cost in the UI, global monthly cap.
+
+8.5 Scale-up (diagram only, do not build)
+Trigger                          | Change
+EC2 memory constrained           | Split API, worker and database
+DB needs independent reliability | RDS PostgreSQL
+Queue grows                      | ECS Fargate workers scaled by queue depth (ingestion + agent jobs)
+API traffic grows                | ALB + separate API compute
+Multiple instances               | Shared Redis for rate limits and cache
+High availability                | Multi-AZ database and app
+A single EC2 host is a single point of failure. State this in the README.
+
+==================================================================
+9. Database (trimmed schema)
+==================================================================
+users                       | Cognito subject
+notebooks                   | Research notebooks
+sources                     | Documents/URLs, SHA-256 hash
+pages                       | Page-level text
+chunks                      | Text, offsets, metadata, embedding, tsvector
+conversations, messages     | Chat history
+message_citations           | Message -> chunk mapping
+claims, verification_results| Claim status and reason
+jobs                        | Ingestion + agent jobs: type, state, retries, idempotency key
+agent_steps                 | Agent trace per job (a report job is the run): state, tool, input, output, tokens, latency
+reports                     | Report metadata, S3 key
+usage_ledger                | Tokens, cost, latency
+evaluation_runs             | Experiment config and results
+MVP isolation: user_id + notebook_id filter on every query, plus one cross-user access test. Row-level security stays "Planned".
+
+==================================================================
+10. Five-week plan (detailed agent-driven steps in roadmap.txt)
+==================================================================
+Week | Work                                                                         | Deliverable
+1    | Phase 0 fixes, make eval harness, relabel 175 verifier pairs, 50 golden Qs   | Verifier regression tests pass, no hardcoded README numbers
+2    | Ingestion + offsets, contextual headers, hybrid retrieval, reranker, E1-E4   | Retrieval benchmark table; 100 golden Qs
+3    | Grounded chat, verification, abstention, query rewrite, E5-E7, CI gate       | RESULTS.md with real numbers
+4    | Report Agent, agent trace, usage ledger, E8                                  | Agent vs single-shot table; 150 golden Qs
+5    | Terraform + AWS deploy, minimal UI, MCP (optional), README, demo video       | Live URL, 2-minute video
+Cut order if short on time: PDF highlight -> MCP -> E6 -> query rewrite -> UI polish.
+Never cut: eval, verifier, agent budgets.
+
+==================================================================
+11. Repo structure
+==================================================================
+CiteGuard/
+  CLAUDE.md                # rules for the coding agent (see roadmap.txt)
+  apps/web/                # React + Vite + TypeScript
+  services/api/            # FastAPI
+  services/worker/         # SQS consumer (ingestion + agent jobs)
+  packages/ingestion/
+  packages/retrieval/
+  packages/verification/
+  packages/agent/          # Report Agent state machine + budgets
+  packages/evaluation/
+  packages/llm_gateway/    # Bedrock / Groq adapter, caching, cost accounting
+  infra/terraform/
+  tests/{unit,integration,security,evaluation}/
+  data/{golden,verifier}/
+  docker-compose.yml
+  Makefile
+  RESULTS.md
+  README.md
+
+Runnable commands:
+pytest -q
+python -m evaluation.run_retrieval
+python -m evaluation.run_verifier
+python -m evaluation.run_agent
+python -m evaluation.run_ablation
+
+==================================================================
+12. README structure
+==================================================================
+1. Problem statement and one-liner
+2. Demo GIF and live link
+3. Architecture diagram
+4. RAG pipeline and design decisions
+5. Citation and verification design
+6. Report Agent design and budgets
+7. Evaluation method and the real ablation table (E1-E8)
+8. AWS deployment and cost decisions
+9. Security and failure handling
+10. Known limitations (be honest)
+11. Setup instructions
+
+==================================================================
+13. Resume bullets (template)
+==================================================================
+CiteGuard | Python, FastAPI, PostgreSQL, pgvector, AWS (S3, EC2, SQS, Cognito, Bedrock), Docker, Terraform
+- Built a source-grounded research workspace that verifies every generated claim against exact source quotes; reduced unsupported-claim acceptance from X% to Y% on a N-example hand-labelled benchmark.
+- Implemented hybrid retrieval (pgvector, PostgreSQL full-text, RRF, cross-encoder reranking), improving Recall@10 from X to Y over a dense-only baseline.
+- Built a budget-bounded research agent (plan -> retrieve -> verify -> retry) producing reports from verified claims only; improved multi-hop correctness from X to Y over single-shot RAG at $Z per report.
+- Deployed on AWS with Terraform at about $X/month; tracked tokens, latency and cost per answer and report.
+Fill X, Y, Z, N only from eval output. List only features that shipped.
+
+==================================================================
+14. Interview prep (understand these yourself)
+==================================================================
+- Why did E3 beat E1, and which experiment did not help?
+- Did contextual headers help? On which question categories?
+- Where does the verifier fail? Give one real failure example.
+- Why is the agent bounded, and what happens when it hits its budget?
+- When did the agent beat single-shot RAG, and when was it just slower and more expensive?
+- How is tenant data isolated, and what does the cross-user test check?
+- What happens when a worker crashes mid-job? (SQS visibility timeout, retry, idempotency key, DLQ)
+- What did a report cost, and how did you reduce it?
+- When do dense and sparse retrieval each fail; why RRF over raw score fusion?
+- How would you scale beyond one EC2 host?
+A coding agent can write the code. You must own the golden-set labels and every design decision.
+
+==================================================================
+15. What not to do
+==================================================================
+- Multi-agent systems, agent frameworks, or "more agents".
+- Kubernetes, OpenSearch, multiple databases, fine-tuning, knowledge graphs.
+- A fancy UI before the eval exists.
+- Half-implemented features.
+- Feature parity with NotebookLM.
+- Unshipped features on the resume.
+
+Final verdict
+A real eval, an honest agent comparison, and a live demo make this a strong flagship for a fresher. Half-built features with fake numbers make it average or worse. Keep the scope small and the numbers real.

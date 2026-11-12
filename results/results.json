@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-11-11T06:15:05.769841+00:00",
+  "summary": {
+    "total_golden_questions": 25,
+    "total_verifier_pairs": 91
+  },
+  "verifier": {
+    "scope": "stage 1 deterministic check only",
+    "precision": 0.541,
+    "recall": 1.0,
+    "f1": 0.7021,
+    "false_acceptance_rate": 0.4828,
+    "false_rejection_rate": 0.0,
+    "accuracy_ci_95": [
+      0.5604,
+      0.7363
+    ],
+    "confusion_matrix": {
+      "supports": {
+        "supports": 33,
+        "partial": 0,
+        "unsupported": 0
+      },
+      "partial": {
+        "supports": 7,
+        "partial": 0,
+        "unsupported": 4
+      },
+      "unsupported": {
+        "supports": 21,
+        "partial": 0,
+        "unsupported": 26
+      }
+    }
+  },
+  "categories": {
+    "factual": 5,
+    "numerical": 6,
+    "comparative": 3,
+    "temporal": 2,
+    "multi-hop": 2,
+    "multi-document": 3,
+    "conflicting": 1,
+    "unanswerable": 3
+  },
+  "verifier_two_stage": {
+    "total_pairs": 91,
+    "precision": 1.0,
+    "recall": 0.9697,
+    "f1": 0.9846,
+    "false_acceptance_rate": 0.0,
+    "false_rejection_rate": 0.0303,
+    "bootstrap_95_ci": [
+      0.8352,
+      0.956
+    ],
+    "confusion_matrix": {
+      "supports": {
+        "supports": 32,
+        "partial": 1,
+        "unsupported": 0
+      },
+      "partial": {
+        "supports": 0,
+        "partial": 6,
+        "unsupported": 5
+      },
+      "unsupported": {
+        "supports": 0,
+        "partial": 3,
+        "unsupported": 44
+      }
+    }
+  }
+}
