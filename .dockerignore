@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+.cache
+.localstack
+**/__pycache__
+**/node_modules
+apps
+data
+results
+tests
+infra
+*.egg-info

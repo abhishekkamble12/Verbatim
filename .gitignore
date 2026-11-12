@@ -1,0 +1,129 @@
+# ==============================================================================
+# Python & Bytecode
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ==============================================================================
+# Virtual Environments
+# ==============================================================================
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==============================================================================
+# Testing, Linting & Type Checking
+# ==============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/
+.cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ==============================================================================
+# Node, Frontend & Web
+# ==============================================================================
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.vite/
+**/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+
+# ==============================================================================
+# Environment & Secrets (Never commit secrets or credentials)
+# ==============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# ==============================================================================
+# Local Infrastructure & Databases
+# ==============================================================================
+.localstack/
+pgdata/
+*.sqlite3
+*.db
+*.log
+
+# ==============================================================================
+# Terraform & Cloud IaC
+# ==============================================================================
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.tfstate.lock.info
+crash.log
+
+# ==============================================================================
+# Operating System & Editor Artifacts
+# ==============================================================================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# ==============================================================================
+# Evaluation Corpus & Temporary Data
+# ==============================================================================
+data/corpus/*.pdf
+!data/corpus/Apollo_11_Mission_Report.pdf
+tmp/
+temp/
+*.tmp
+scratch/
+
+# ==============================================================================
+# Media & Large Binary Recordings
+# ==============================================================================
+*.webm
+*.mp4

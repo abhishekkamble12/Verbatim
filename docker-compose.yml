@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: citeguard-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: citeguard
+      POSTGRES_PASSWORD: citeguard_dev_password
+      POSTGRES_DB: citeguard
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U citeguard -d citeguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3.8.1
+    container_name: citeguard-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,sqs
+      - AWS_DEFAULT_REGION=us-east-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "${LOCALSTACK_VOLUME_DIR:-./.localstack}:/var/lib/localstack"
+      - "./infra/localstack/init.sh:/etc/localstack/init/ready.d/init.sh"
+
+volumes:
+  pgdata:
+
