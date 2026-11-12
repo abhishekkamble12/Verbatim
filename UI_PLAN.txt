@@ -1,0 +1,146 @@
+CITEGUARD WEB UI PLAN (roadmap task T5.3)
+==========================================
+To be saved after approval as: UI_PLAN.txt (repo root, next to roadmap.txt)
+
+
+CONTEXT
+-------
+apps/web/ holds only .gitkeep. The backend works (102 tests pass), but the only way to
+use the product is curl. Project.txt sec. 4 and roadmap T5.3 ask for: login, notebook list,
+upload, chat with a status badge per claim, an evidence panel (quote + page + source link),
+a report view with "show trace", and cost per answer/report.
+Rules from CLAUDE.md that shape this plan: React + Vite + TS, plain CSS, no component
+library, no new dependencies without asking, every query scoped by user_id AND notebook_id,
+and no invented numbers.
+
+Decisions already made:
+  - Add a few small read-only backend endpoints (the UI can't work without them).
+  - Login = local "sign in as" (X-User-Id, AUTH_MODE=local). Cognito comes later, after T5.1/T5.2.
+  - Show real token counts. Dollar cost stays under "Planned" until usage_ledger is written.
+
+What "best UI" means here: the product's promise is "every claim is backed by an exact quote,
+or it abstains". The UI's job is to make that trust visible at a glance:
+  - every sentence is a claim with a visible status (verified / partial / rejected)
+  - one click on a claim shows the exact quote, the page and the document
+  - abstention ("insufficient evidence") is a clear, intentional state, not an error
+  - the agent's work is inspectable (trace: state, tool, tokens, latency per step)
+Fast, calm, readable, keyboard-friendly and accessible. No visual gimmicks.
+
+
+PART A - BACKEND GAPS (tests first, then code)
+----------------------------------------------
+File: services/api/main.py (reuse owned_notebook, get_owned_report, current_user, get_session)
+Tests: tests/integration/test_api_flow.py and tests/security/ (another user gets 403 on each)
+
+A1  GET /notebooks
+      -> [{id, title, description, created_at}] filtered by user_id.
+A2  GET /notebooks/{id}/sources
+      -> [{id, title, source_type, created_at}] filtered by user_id AND notebook_id.
+      Also lists the notebook's ingestion jobs that are still running or failed, so the
+      sidebar can show "processing..." / "failed".
+A3  GET /notebooks/{id}/conversations  and  GET /conversations/{id}/messages
+      -> messages with their claims and citations, filtered by user_id AND notebook_id.
+      Known limit: MessageCitation links to the message, not the claim, so reloaded
+      history shows citations per message, not per claim. A live chat answer still has
+      the per-claim mapping. Fixing this needs a schema change; noted, not done.
+A4  Source title on citations: in the chat response, add source_id + source_title to
+      each citation (one query on Chunk -> Source, filtered by user_id AND notebook_id).
+      The report claims get the same if their JSON carries chunk ids.
+A5  GET /sources/{id}/download -> {url}: a presigned S3 GET URL for the source link.
+      New helper presign_download() in services/aws.py next to presign_upload(); tests
+      replace it the same way they replace the others.
+A6  Local S3/SQS setup: an init script for LocalStack (mounted via docker-compose.yml into
+      /etc/localstack/init/ready.d) that creates the bucket and queue and sets bucket
+      CORS to allow PUT/GET from http://localhost:5173. Without it a browser upload fails.
+      No bucket/queue/CORS setup exists anywhere today.
+
+Not changed: auth.py, the verification pipeline, the agent.
+
+
+PART B - FRONTEND (apps/web, React + Vite + TypeScript, plain CSS)
+------------------------------------------------------------------
+Dependencies: react, react-dom, vite, @vitejs/plugin-react, typescript. Nothing else:
+no router library (a small hash-based switch), no UI kit, no state library, no markdown
+library (report markdown rendered as escaped text with paragraphs/headings handled by a
+tiny function, never raw HTML insertion).
+Dev: Vite proxy /api -> http://localhost:8000, so the API needs no CORS.
+
+Layout (3 panes on desktop, stacked on phone width):
+  +-------------+------------------------------+------------------+
+  | Notebooks   |  Chat / Report               |  Evidence        |
+  | Sources     |  claim-by-claim answer       |  quote, page,    |
+  | + Upload    |  with status badges          |  document, link  |
+  +-------------+------------------------------+------------------+
+
+Files (one responsibility each):
+  src/api.ts          typed fetch client; adds X-User-Id; turns 401/403/404/422/503
+                      into readable messages (503 = "LLM not configured").
+  src/types.ts        types mirroring the API responses above (ClaimItem, CitationRef...).
+  src/App.tsx         sign-in gate + hash routes: #/ , #/nb/:id , #/report/:id
+  src/SignIn.tsx      "sign in as" user id field (dev only, labelled as such).
+  src/Notebooks.tsx   list + create notebook.
+  src/Sources.tsx     source list, upload (presign -> PUT -> start -> poll GET /jobs/{id}
+                      every 2s with backoff, stop on done/failed), progress + error states.
+  src/Chat.tsx        conversation, input, answer rendered claim by claim.
+  src/Claim.tsx       claim text + badge: Verified (green check), Partial (amber),
+                      Rejected (red, struck out, reason on hover/expand).
+                      Colour is never the only signal: icon + word on each badge.
+  src/Evidence.tsx    selected claim's citations: quoted text, "p. N", source title,
+                      "Open PDF" (A5 link, #page=N appended).
+  src/Report.tsx      ask a report question -> poll job -> show report; "partial" banner
+                      when is_partial; claims clickable into the Evidence pane.
+  src/Trace.tsx       "Show trace" table: state, tool, tokens, latency; totals row
+                      (total tokens, total time). Tool input/output collapsible.
+  src/styles.css      tokens on :root (colours, spacing, radius, font), dark mode via
+                      prefers-color-scheme, system font stack, focus rings, 16px gutters.
+
+UX rules:
+  - Abstention gets its own designed state: "Not enough evidence in your sources",
+    with the rewritten query shown when the API rewrote it.
+  - Every async view has loading, empty and error states (empty notebook -> "Upload a PDF
+    to start").
+  - Keyboard: Enter sends, Shift+Enter newline, claims are buttons (Tab + Enter opens
+    evidence), visible focus, aria-live region for new answers and job status.
+  - Never show a number the API did not return. Cost label reads "Cost tracking: planned".
+
+Explicitly not in scope: Cognito login, PDF viewer with highlighting (cut first per
+Project.txt sec. 11), streaming answers, sharing, settings pages, animations beyond
+simple transitions.
+
+
+PART C - TASK ORDER (one commit each, `make test` + `make lint` green before each)
+----------------------------------------------------------------------------------
+ 1. A6 LocalStack init (bucket, queue, CORS) + README quickstart line.
+ 2. A1 + A2 list endpoints, with tenant-isolation tests.
+ 3. A3 history endpoints, with tests.
+ 4. A4 source title on citations + A5 download URL, with tests.
+ 5. Vite scaffold, api.ts, types.ts, styles.css, SignIn, Notebooks.
+ 6. Sources + upload flow with job polling.
+ 7. Chat + Claim + Evidence.
+ 8. Report + Trace.
+ 9. Polish pass: phone width, dark mode, keyboard, empty/error states.
+10. README: move "React + Vite web interface" out of Planned; keep Cognito login and
+    dollar cost under Planned. NOTES.md one line per task.
+
+Add to Makefile: `web` (npm run dev in apps/web) and `web-build` (tsc --noEmit + vite build).
+
+
+PART D - VERIFICATION
+---------------------
+Backend: `make test` (Postgres on 5434, TEST_DATABASE_URL set; 0 skipped) and `make lint`.
+  New tests: each new endpoint returns another user's data as 403/404, never 200.
+Frontend: `npm run build` in apps/web (tsc --noEmit + vite build) passes with no errors.
+End to end in a browser (Playwright MCP or by hand), with API + worker + LocalStack running:
+  1. sign in as alice -> create notebook -> upload a PDF -> watch it go processing -> ready
+  2. ask a question answered by the PDF -> claims show badges -> click one -> the evidence
+     quote matches the PDF text on the shown page -> "Open PDF" opens it
+  3. ask something not in the PDF -> abstention state shown
+  4. create a report -> it finishes -> "Show trace" lists steps with tokens and latency
+  5. sign in as bob -> alice's notebook is not listed, and its URL shows "access denied"
+  6. phone width (375px): no horizontal scroll; dark mode readable; whole flow by keyboard
+Steps 2-4 need an LLM provider (Bedrock or GROQ_API_KEY). Without one, chat shows the
+503 "LLM not configured" message, which is itself a state to check.
+
+OPEN QUESTION (needs your OK per CLAUDE.md "no new dependencies"):
+  Vitest for a few frontend unit tests (api.ts error mapping, Claim badge per status).
+  If declined, frontend checking relies on tsc + the browser walkthrough above.

@@ -1,0 +1,52 @@
+#!/bin/bash
+# First boot of the EC2 host: Docker, the deploy script and the nightly database backup.
+set -euxo pipefail
+
+# 1 GB of swap: the API, the worker and Postgres share a 1 GB instance.
+dd if=/dev/zero of=/swapfile bs=1M count=1024
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+dnf install -y docker cronie
+systemctl enable --now docker crond
+mkdir -p /usr/local/lib/docker/cli-plugins /opt/citeguard
+curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-aarch64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Run on every deploy (GitHub Actions calls it through SSM): fresh config from SSM, newest image from ECR.
+cat > /opt/citeguard/deploy.sh <<'DEPLOY'
+#!/bin/bash
+set -euo pipefail
+cd /opt/citeguard
+umask 077
+aws ssm get-parameters-by-path --region ${region} --path /citeguard/app --with-decryption \
+  --query 'Parameters[*].[Name,Value]' --output text | sed 's|^/citeguard/app/||; s|\t|=|' > .env
+if grep -q CHANGE_ME .env; then
+  echo "SSM still holds placeholder secrets. Set them first: see infra/terraform/README.md" >&2
+  exit 1
+fi
+export IMAGE=${image}
+aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${registry}
+docker pull "$IMAGE"
+# The compose file ships inside the image, so it always matches the code being started.
+docker run --rm --entrypoint cat "$IMAGE" /app/docker-compose.prod.yml > docker-compose.yml
+docker compose up -d --remove-orphans
+docker image prune -f
+DEPLOY
+
+cat > /opt/citeguard/backup.sh <<'BACKUP'
+#!/bin/bash
+set -euo pipefail
+docker exec citeguard-postgres pg_dump -U citeguard citeguard | gzip \
+  | aws s3 cp - "s3://${bucket}/backups/citeguard-$(date +%F).sql.gz"
+BACKUP
+
+chmod +x /opt/citeguard/deploy.sh /opt/citeguard/backup.sh
+# 18:00 UTC = 23:30 IST, half an hour before the nightly stop.
+echo '0 18 * * * root /opt/citeguard/backup.sh' > /etc/cron.d/citeguard-backup
+
+# Fails until the first image is pushed and the secrets are set; the deploy workflow runs it again.
+/opt/citeguard/deploy.sh || true
